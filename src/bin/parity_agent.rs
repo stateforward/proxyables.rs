@@ -9,15 +9,15 @@ use tokio::time::{sleep, Duration};
 
 const PROTOCOL: &str = "parity-json-v1";
 const CAPABILITIES: &[&str] = &[
-    "get_scalars",
-    "call_add",
-    "nested_object_access",
-    "construct_greeter",
-    "callback_roundtrip",
-    "object_argument_roundtrip",
-    "error_propagation",
-    "shared_reference_consistency",
-    "explicit_release",
+    "GetScalars",
+    "CallAdd",
+    "NestedObjectAccess",
+    "ConstructGreeter",
+    "CallbackRoundtrip",
+    "ObjectArgumentRoundtrip",
+    "ErrorPropagation",
+    "SharedReferenceConsistency",
+    "ExplicitRelease",
 ];
 
 struct Fixture {
@@ -42,26 +42,27 @@ impl Fixture {
     }
 
     fn run_scenario(&mut self, scenario: &str) -> Result<Value, String> {
-        match scenario {
-            "get_scalars" => Ok(json!({
+        let canonical = normalize_scenario(scenario).ok_or_else(|| "unsupported".to_string())?;
+        match canonical.as_str() {
+            "GetScalars" => Ok(json!({
                 "intValue": self.int_value,
                 "boolValue": self.bool_value,
                 "stringValue": self.string_value,
                 "nullValue": self.null_value,
             })),
-            "call_add" => Ok(json!(42)),
-            "nested_object_access" => Ok(json!({ "label": "nested", "pong": "pong" })),
-            "construct_greeter" => Ok(json!("Hello World")),
-            "callback_roundtrip" => Ok(json!("callback:value")),
-            "object_argument_roundtrip" => Ok(json!("helper:Ada")),
-            "error_propagation" => Ok(json!("Boom")),
-            "shared_reference_consistency" => Ok(json!({
+            "CallAdd" => Ok(json!(42)),
+            "NestedObjectAccess" => Ok(json!({ "label": "nested", "pong": "pong" })),
+            "ConstructGreeter" => Ok(json!("Hello World")),
+            "CallbackRoundtrip" => Ok(json!("callback:value")),
+            "ObjectArgumentRoundtrip" => Ok(json!("helper:Ada")),
+            "ErrorPropagation" => Ok(json!("Boom")),
+            "SharedReferenceConsistency" => Ok(json!({
                 "firstKind": "shared",
                 "secondKind": "shared",
                 "firstValue": "shared",
                 "secondValue": "shared",
             })),
-            "explicit_release" => {
+            "ExplicitRelease" => {
                 let before = self.active_refs.len() as i64;
                 let first = self.acquire_shared();
                 let second = self.acquire_shared();
@@ -91,7 +92,10 @@ impl Fixture {
 }
 
 fn emit(payload: Value) {
-    println!("{}", serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()));
+    println!(
+        "{}",
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
 fn parse_scenarios(raw: &str) -> Vec<String> {
@@ -100,6 +104,60 @@ fn parse_scenarios(raw: &str) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn to_pascal_case(value: &str) -> String {
+    let has_delimiter = value.contains('_') || value.contains('-') || value.contains(' ');
+    if has_delimiter {
+        return value
+            .split(|item: char| !item.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(capitalize_word)
+            .collect::<String>();
+    }
+
+    let mut boundaries = vec![0];
+    let chars: Vec<(usize, char)> = value.char_indices().collect();
+    let mut index = 1;
+    while index < chars.len() {
+        let prev = chars[index - 1].1;
+        let current = chars[index].1;
+        if prev.is_ascii_lowercase() && current.is_ascii_uppercase() {
+            boundaries.push(chars[index].0);
+        }
+        index += 1;
+    }
+    boundaries.push(value.len());
+
+    let mut result = String::new();
+    for window in boundaries.windows(2) {
+        let start = window[0];
+        let end = window[1];
+        result.push_str(&capitalize_word(&value[start..end]));
+    }
+    result
+}
+
+fn capitalize_word(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut result = String::new();
+    result.push(first.to_ascii_uppercase());
+    for ch in chars {
+        result.push(ch.to_ascii_lowercase());
+    }
+    result
+}
+
+fn normalize_scenario(raw: &str) -> Option<String> {
+    let canonical = to_pascal_case(raw);
+    if has_capability(&canonical) {
+        Some(canonical)
+    } else {
+        None
+    }
 }
 
 fn has_capability(name: &str) -> bool {
@@ -132,16 +190,21 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn handle_stream(mut stream: TcpStream, fixture: std::sync::Arc<Mutex<Fixture>>) -> io::Result<()> {
+async fn handle_stream(
+    mut stream: TcpStream,
+    fixture: std::sync::Arc<Mutex<Fixture>>,
+) -> io::Result<()> {
     let mut request = Vec::new();
     stream.read_to_end(&mut request).await?;
     let scenarios = parse_scenarios(String::from_utf8_lossy(&request).as_ref());
 
     for scenario in scenarios {
+        let canonical = normalize_scenario(&scenario);
         let mut payload = serde_json::Map::new();
         payload.insert("type".to_string(), json!("scenario"));
-        payload.insert("scenario".to_string(), json!(scenario));
-        if !has_capability(&payload.get("scenario").unwrap().as_str().unwrap_or("")) {
+        let reported_scenario = canonical.clone().unwrap_or(scenario.clone());
+        payload.insert("scenario".to_string(), json!(reported_scenario.clone()));
+        if canonical.is_none() || !has_capability(&reported_scenario) {
             payload.insert("status".to_string(), json!("unsupported"));
             payload.insert("protocol".to_string(), json!(PROTOCOL));
             payload.insert("message".to_string(), json!("unsupported"));
@@ -151,7 +214,7 @@ async fn handle_stream(mut stream: TcpStream, fixture: std::sync::Arc<Mutex<Fixt
             continue;
         }
 
-        let name = payload["scenario"].as_str().unwrap_or("");
+        let name = reported_scenario.as_str();
         let mut fixture = fixture.lock().await;
         match fixture.run_scenario(name) {
             Ok(actual) => {
@@ -176,7 +239,10 @@ async fn handle_stream(mut stream: TcpStream, fixture: std::sync::Arc<Mutex<Fixt
 
 async fn drive(host: &str, port: u16, scenarios: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect((host, port)).await?;
-    let requested = parse_scenarios(scenarios);
+    let requested: Vec<String> = parse_scenarios(scenarios)
+        .into_iter()
+        .map(|scenario| normalize_scenario(&scenario).unwrap_or(scenario))
+        .collect();
     let request = format!("{}\n", requested.join(","));
     stream.writable().await?;
     stream.try_write(request.as_bytes())?;
@@ -204,7 +270,10 @@ async fn drive(host: &str, port: u16, scenarios: &str) -> Result<(), Box<dyn std
                 if let Some(item) = payload.get("scenario").and_then(Value::as_str) {
                     seen.insert(item.to_string());
                 }
-                println!("{}", serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()));
+                println!(
+                    "{}",
+                    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+                );
             }
             Err(_) => {}
         }
