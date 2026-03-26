@@ -21,6 +21,12 @@ pub struct Registry {
     // For now, simple ID -> Object mapping.
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegistrySnapshot {
+    pub entries: usize,
+    pub retains: usize,
+}
+
 impl Registry {
     pub fn new() -> Self {
         Self {
@@ -63,6 +69,15 @@ impl Registry {
             if *count == 0 {
                 map.remove(id);
             }
+        }
+    }
+
+    pub fn snapshot(&self) -> RegistrySnapshot {
+        let map = self.objects.lock().unwrap();
+        let retains = map.values().map(|(_, count)| *count).sum();
+        RegistrySnapshot {
+            entries: map.len(),
+            retains,
         }
     }
 }

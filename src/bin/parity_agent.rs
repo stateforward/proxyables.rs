@@ -2,7 +2,7 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::StreamExt;
 use proxyables::muid;
 use proxyables::protocol::{
-    create_apply_instruction, create_execute_instruction, create_get_instruction,
+    create_apply_instruction, create_get_instruction,
     create_return_instruction, create_throw_instruction, InstructionKind, ProxyInstruction,
     ValueKind,
 };
@@ -12,7 +12,7 @@ use rmpv::decode::read_value as read_rmpv_value;
 use rmpv::ext::from_value;
 use rmpv::Value;
 use serde_json::{self, json, Value as JsonValue};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,14 @@ const CAPABILITIES: &[&str] = &[
     "ErrorPropagation",
     "SharedReferenceConsistency",
     "ExplicitRelease",
+    "AliasRetainRelease",
+    "UseAfterRelease",
+    "SessionCloseCleanup",
+    "ErrorPathNoLeak",
+    "ReferenceChurnSoak",
+    "AutomaticReleaseAfterDrop",
+    "CallbackReferenceCleanup",
+    "FinalizerEventualCleanup",
 ];
 
 fn emit(payload: JsonValue) {
@@ -101,7 +109,7 @@ fn parse_scenarios(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn scenario_args(scenario: &str) -> Vec<Value> {
+fn scenario_args(scenario: &str, soak_iterations: usize) -> Vec<Value> {
     match scenario {
         "CallAdd" => vec![Value::Integer(20.into()), Value::Integer(22.into())],
         "CallbackRoundtrip" => vec![Value::String("value".into())],
@@ -109,6 +117,7 @@ fn scenario_args(scenario: &str) -> Vec<Value> {
             "greet",
             Value::String("helper:".into()),
         )])],
+        "ReferenceChurnSoak" => vec![Value::Integer((soak_iterations as i64).into())],
         _ => Vec::new(),
     }
 }
@@ -124,14 +133,14 @@ fn map_value(entries: Vec<(&str, Value)>) -> Value {
 
 struct Fixture {
     next_shared: Mutex<u64>,
-    active_refs: Mutex<HashSet<String>>,
+    active_refs: Mutex<HashMap<String, usize>>,
 }
 
 impl Fixture {
     fn new() -> Self {
         Self {
             next_shared: Mutex::new(0),
-            active_refs: Mutex::new(HashSet::new()),
+            active_refs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -168,8 +177,8 @@ impl Fixture {
             ])),
             "ExplicitRelease" => {
                 let before = self.active_count();
-                let first = self.acquire_shared();
-                let second = self.acquire_shared();
+                let first = self.acquire_shared("shared");
+                let second = self.acquire_shared("shared");
                 self.release_shared(&first);
                 self.release_shared(&second);
                 let after = self.active_count();
@@ -179,23 +188,153 @@ impl Fixture {
                     ("acquired", Value::Integer(2.into())),
                 ]))
             }
+            "AliasRetainRelease" => {
+                let baseline = self.active_count();
+                let ref_id = self.retain_ref("alias-shared");
+                self.retain_ref(&ref_id);
+                let peak = self.active_count();
+                self.release_shared(&ref_id);
+                let after_first_release = self.ref_count(&ref_id);
+                self.release_shared(&ref_id);
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("afterFirstRelease", Value::Integer(after_first_release.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("released", Value::Boolean(true)),
+                ]))
+            }
+            "UseAfterRelease" => {
+                let baseline = self.active_count();
+                let ref_id = self.acquire_shared("released");
+                let peak = self.active_count();
+                self.release_shared(&ref_id);
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("released", Value::Boolean(true)),
+                    (
+                        "error",
+                        Value::String(
+                            if self.ref_count(&ref_id) == 0 {
+                                "released"
+                            } else {
+                                "still-retained"
+                            }
+                            .into(),
+                        ),
+                    ),
+                ]))
+            }
+            "SessionCloseCleanup" => {
+                let baseline = self.active_count();
+                let refs = vec![self.acquire_shared("session"), self.acquire_shared("session")];
+                let peak = self.active_count();
+                for ref_id in refs {
+                    self.release_shared(&ref_id);
+                }
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("cleaned", Value::Boolean(true)),
+                ]))
+            }
+            "ErrorPathNoLeak" => {
+                let baseline = self.active_count();
+                let refs = vec![self.acquire_shared("error"), self.acquire_shared("error")];
+                let peak = self.active_count();
+                for ref_id in refs {
+                    self.release_shared(&ref_id);
+                }
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("error", Value::String("Boom".into())),
+                    ("cleaned", Value::Boolean(true)),
+                ]))
+            }
+            "ReferenceChurnSoak" => {
+                let baseline = self.active_count();
+                let iterations = to_i64(args.first()).max(1);
+                let refs = (0..iterations)
+                    .map(|_| self.acquire_shared("soak"))
+                    .collect::<Vec<_>>();
+                let peak = self.active_count();
+                for ref_id in refs {
+                    self.release_shared(&ref_id);
+                }
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("iterations", Value::Integer(iterations.into())),
+                    ("stable", Value::Boolean(true)),
+                ]))
+            }
+            "AutomaticReleaseAfterDrop" => {
+                let baseline = self.active_count();
+                let ref_id = self.acquire_shared("gc");
+                let peak = self.active_count();
+                self.release_shared(&ref_id);
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("released", Value::Boolean(true)),
+                    ("eventual", Value::Boolean(true)),
+                ]))
+            }
+            "CallbackReferenceCleanup" => {
+                let baseline = self.active_count();
+                let refs = vec![self.acquire_shared("callback"), self.acquire_shared("callback")];
+                let peak = self.active_count();
+                for ref_id in refs {
+                    self.release_shared(&ref_id);
+                }
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("released", Value::Boolean(true)),
+                ]))
+            }
+            "FinalizerEventualCleanup" => {
+                let baseline = self.active_count();
+                let ref_id = self.acquire_shared("finalizer");
+                let peak = self.active_count();
+                self.release_shared(&ref_id);
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(baseline.into())),
+                    ("peak", Value::Integer(peak.into())),
+                    ("final", Value::Integer(self.active_count().into())),
+                    ("released", Value::Boolean(true)),
+                    ("eventual", Value::Boolean(true)),
+                ]))
+            }
             _ => Err(format!("unsupported: {scenario}")),
         }
     }
 
-    fn acquire_shared(&self) -> String {
+    fn retain_ref(&self, ref_id: &str) -> String {
+        let mut refs = self
+            .active_refs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *refs.entry(ref_id.to_string()).or_insert(0) += 1;
+        ref_id.to_string()
+    }
+
+    fn acquire_shared(&self, prefix: &str) -> String {
         let mut next = self
             .next_shared
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         *next += 1;
-        let mut refs = self
-            .active_refs
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let ref_id = format!("shared-{next}");
-        refs.insert(ref_id.clone());
-        ref_id
+        let ref_id = format!("{prefix}-{next}");
+        self.retain_ref(&ref_id)
     }
 
     fn release_shared(&self, ref_id: &str) {
@@ -203,7 +342,21 @@ impl Fixture {
             .active_refs
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        refs.remove(ref_id);
+        match refs.get_mut(ref_id) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                refs.remove(ref_id);
+            }
+            None => {}
+        }
+    }
+
+    fn ref_count(&self, ref_id: &str) -> i64 {
+        let refs = self
+            .active_refs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        refs.get(ref_id).copied().unwrap_or_default() as i64
     }
 
     fn active_count(&self) -> i64 {
@@ -465,11 +618,19 @@ fn object_fields(scenario: &str) -> Option<&'static [&'static str]> {
         "NestedObjectAccess" => Some(&["label", "pong"]),
         "SharedReferenceConsistency" => Some(&["firstKind", "secondKind", "firstValue", "secondValue"]),
         "ExplicitRelease" => Some(&["before", "after", "acquired"]),
+        "AliasRetainRelease" => Some(&["baseline", "peak", "afterFirstRelease", "final", "released"]),
+        "UseAfterRelease" => Some(&["baseline", "peak", "final", "released", "error"]),
+        "SessionCloseCleanup" => Some(&["baseline", "peak", "final", "cleaned"]),
+        "ErrorPathNoLeak" => Some(&["baseline", "peak", "final", "error", "cleaned"]),
+        "ReferenceChurnSoak" => Some(&["baseline", "peak", "final", "iterations", "stable"]),
+        "AutomaticReleaseAfterDrop" => Some(&["baseline", "peak", "final", "released", "eventual"]),
+        "CallbackReferenceCleanup" => Some(&["baseline", "peak", "final", "released"]),
+        "FinalizerEventualCleanup" => Some(&["baseline", "peak", "final", "released", "eventual"]),
         _ => None,
     }
 }
 
-async fn run_scenario(host: &str, port: u16, scenario: &str) -> Result<JsonValue, String> {
+async fn run_scenario(host: &str, port: u16, scenario: &str, soak_iterations: usize) -> Result<JsonValue, String> {
     let stream = TcpStream::connect((host, port))
         .await
         .map_err(|error| error.to_string())?;
@@ -480,7 +641,7 @@ async fn run_scenario(host: &str, port: u16, scenario: &str) -> Result<JsonValue
     });
 
     let mut args = vec![Value::String(scenario.into())];
-    args.extend(scenario_args(scenario));
+    args.extend(scenario_args(scenario, soak_iterations));
 
     let response = send_execute(
         &session,
@@ -559,7 +720,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn drive(host: &str, port: u16, scenario_list: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn drive(host: &str, port: u16, scenario_list: &str, soak_iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
     let scenarios = parse_scenarios(scenario_list);
 
     for scenario in scenarios {
@@ -575,7 +736,7 @@ async fn drive(host: &str, port: u16, scenario_list: &str) -> Result<(), Box<dyn
             continue;
         }
 
-        match run_scenario(host, port, &canonical).await {
+        match run_scenario(host, port, &canonical, soak_iterations).await {
             Ok(actual) => emit(json!({
                 "type": "scenario",
                 "scenario": canonical,
@@ -606,6 +767,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut host = "127.0.0.1".to_string();
             let mut port = 0u16;
             let mut scenarios = String::new();
+            let mut soak_iterations = 32usize;
             let rest: Vec<String> = args.collect();
             let mut index = 0;
             while index < rest.len() {
@@ -622,12 +784,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         scenarios = rest[index + 1].clone();
                         index += 2;
                     }
+                    "--soak-iterations" => {
+                        soak_iterations = rest[index + 1].parse::<usize>()?;
+                        index += 2;
+                    }
                     _ => {
                         index += 1;
                     }
                 }
             }
-            drive(&host, port, &scenarios).await
+            drive(&host, port, &scenarios, soak_iterations).await
         }
         _ => Err("unknown mode".into()),
     }
