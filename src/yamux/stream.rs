@@ -1,12 +1,11 @@
-
-use futures::io::{AsyncRead, AsyncWrite, self};
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
-use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
-use futures::channel::mpsc;
-use super::frame::Frame;
 use super::consts::*;
+use super::frame::Frame;
+use futures::channel::mpsc;
+use futures::io::{self, AsyncRead, AsyncWrite};
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug)]
 pub(crate) struct StreamState {
@@ -39,7 +38,9 @@ impl StreamHandle {
 
     pub(crate) fn feed_data(&self, data: Vec<u8>) {
         let mut state = self.state.lock().unwrap();
-        if state.remote_closed { return; }
+        if state.remote_closed {
+            return;
+        }
         state.read_buf.extend(data);
         if let Some(waker) = state.read_waker.take() {
             waker.wake();
@@ -62,7 +63,7 @@ impl AsyncRead for StreamHandle {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         let mut state = self.state.lock().unwrap();
-        
+
         if !state.read_buf.is_empty() {
             let len = std::cmp::min(buf.len(), state.read_buf.len());
             for i in 0..len {
@@ -88,14 +89,20 @@ impl AsyncWrite for StreamHandle {
     ) -> Poll<io::Result<usize>> {
         let state = self.state.lock().unwrap();
         if state.closed || state.remote_closed {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "Stream closed")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Stream closed",
+            )));
         }
-        
+
         // Construct frame
         let frame = Frame::new(TYPE_DATA, 0, state.id, buf.to_vec());
         match state.write_sender.unbounded_send(frame) {
             Ok(_) => Poll::Ready(Ok(buf.len())),
-            Err(_) => Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "Session closed"))),
+            Err(_) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Session closed",
+            ))),
         }
     }
 
@@ -105,9 +112,11 @@ impl AsyncWrite for StreamHandle {
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut state = self.state.lock().unwrap();
-        if state.closed { return Poll::Ready(Ok(())); }
+        if state.closed {
+            return Poll::Ready(Ok(()));
+        }
         state.closed = true;
-        
+
         let frame = Frame::control(TYPE_WINDOW_UPDATE, FLAG_FIN, state.id, 0);
         let _ = state.write_sender.unbounded_send(frame);
         Poll::Ready(Ok(()))

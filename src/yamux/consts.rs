@@ -1,4 +1,3 @@
-
 pub const PROTOCOL_VERSION: u8 = 0;
 
 pub const TYPE_DATA: u8 = 0;

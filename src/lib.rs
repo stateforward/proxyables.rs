@@ -1,11 +1,11 @@
-pub mod yamux;
-pub mod protocol;
 pub mod muid;
+pub mod protocol;
 pub mod proxyable;
-pub use proxyables_macros::{proxyable, proxy};
-pub mod registry;
+pub mod yamux;
+pub use proxyables_macros::{proxy, proxyable};
 pub mod exported;
 pub mod imported;
+pub mod registry;
 
 pub use exported::ExportedProxyable;
 pub use imported::ImportedProxyable;

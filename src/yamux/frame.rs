@@ -1,4 +1,3 @@
-
 use super::consts::*;
 use byteorder::{BigEndian, ByteOrder};
 use thiserror::Error;
@@ -60,15 +59,15 @@ impl Frame {
         let mut flags_bytes = [0u8; 2];
         BigEndian::write_u16(&mut flags_bytes, self.header.flags);
         buf.extend_from_slice(&flags_bytes);
-        
+
         let mut id_bytes = [0u8; 4];
         BigEndian::write_u32(&mut id_bytes, self.header.stream_id);
         buf.extend_from_slice(&id_bytes);
-        
+
         let mut len_bytes = [0u8; 4];
         BigEndian::write_u32(&mut len_bytes, self.header.length);
         buf.extend_from_slice(&len_bytes);
-        
+
         buf.extend_from_slice(&self.payload);
         buf
     }
@@ -77,15 +76,15 @@ impl Frame {
         if buf.len() < HEADER_LENGTH {
             return Err(FrameError::IncompleteHeader);
         }
-        
+
         let version = buf[0];
         // if version != PROTOCOL_VERSION { return Err(FrameError::InvalidVersion); } // lenient for now
-        
+
         let typ = buf[1];
         let flags = BigEndian::read_u16(&buf[2..4]);
         let stream_id = BigEndian::read_u32(&buf[4..8]);
         let length = BigEndian::read_u32(&buf[8..12]);
-        
+
         Ok(FrameHeader {
             version,
             typ,

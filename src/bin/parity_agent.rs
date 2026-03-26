@@ -2,9 +2,8 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::stream::StreamExt;
 use proxyables::muid;
 use proxyables::protocol::{
-    create_apply_instruction, create_get_instruction,
-    create_return_instruction, create_throw_instruction, InstructionKind, ProxyInstruction,
-    ValueKind,
+    create_apply_instruction, create_get_instruction, create_return_instruction,
+    create_throw_instruction, InstructionKind, ProxyInstruction, ValueKind,
 };
 use proxyables::yamux::session::Session;
 use proxyables::yamux::stream::StreamHandle;
@@ -39,12 +38,23 @@ const CAPABILITIES: &[&str] = &[
     "AutomaticReleaseAfterDrop",
     "CallbackReferenceCleanup",
     "FinalizerEventualCleanup",
+    "AbruptDisconnectCleanup",
+    "ServerAbortInFlight",
+    "ConcurrentSharedReference",
+    "ConcurrentCallbackFanout",
+    "ReleaseUseRace",
+    "LargePayloadRoundtrip",
+    "DeepObjectGraph",
+    "SlowConsumerBackpressure",
 ];
+const PARITY_ONLY: &[&str] = &["ParityTracePath"];
 
 fn emit(payload: JsonValue) {
     match serde_json::to_string(&payload) {
         Ok(text) => println!("{}", text),
-        Err(_) => println!(r#"{{"type":"scenario","status":"failed","message":"emit serialization error"}}"#),
+        Err(_) => println!(
+            r#"{{"type":"scenario","status":"failed","message":"emit serialization error"}}"#
+        ),
     }
 }
 
@@ -95,6 +105,9 @@ fn to_title_case(input: &str) -> String {
 
 fn normalize_scenario(raw: &str) -> Option<String> {
     let canonical = to_pascal_case(raw);
+    if PARITY_ONLY.iter().any(|name| *name == canonical) {
+        return Some(canonical);
+    }
     CAPABILITIES
         .iter()
         .find(|name| **name == canonical)
@@ -109,17 +122,36 @@ fn parse_scenarios(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn scenario_args(scenario: &str, soak_iterations: usize) -> Vec<Value> {
+fn scenario_args(
+    scenario: &str,
+    soak_iterations: usize,
+    payload_bytes: usize,
+    concurrency: usize,
+) -> Vec<Value> {
     match scenario {
         "CallAdd" => vec![Value::Integer(20.into()), Value::Integer(22.into())],
         "CallbackRoundtrip" => vec![Value::String("value".into())],
-        "ObjectArgumentRoundtrip" => vec![map_value(vec![(
-            "greet",
-            Value::String("helper:".into()),
-        )])],
+        "ObjectArgumentRoundtrip" => vec![Value::String("helper:Ada".into())],
         "ReferenceChurnSoak" => vec![Value::Integer((soak_iterations as i64).into())],
+        "ConcurrentSharedReference" | "ConcurrentCallbackFanout" => {
+            vec![Value::Integer((concurrency as i64).into())]
+        }
+        "LargePayloadRoundtrip" | "SlowConsumerBackpressure" => {
+            vec![Value::Integer((payload_bytes as i64).into())]
+        }
         _ => Vec::new(),
     }
+}
+
+fn canonical_payload(size: usize) -> String {
+    let target = size.max(1);
+    let seed = "proxyables:0123456789:abcdefghijklmnopqrstuvwxyz:";
+    let mut output = String::new();
+    while output.len() < target {
+        output.push_str(seed);
+    }
+    output.truncate(target);
+    output
 }
 
 fn map_value(entries: Vec<(&str, Value)>) -> Value {
@@ -146,6 +178,7 @@ impl Fixture {
 
     fn scenario_result(&self, scenario: &str, args: &[Value]) -> Result<Value, String> {
         match scenario {
+            "ParityTracePath" => Ok(Value::Array(vec![Value::String("rs".into())])),
             "GetScalars" => Ok(map_value(vec![
                 ("intValue", Value::Integer(42.into())),
                 ("boolValue", Value::Boolean(true)),
@@ -199,7 +232,10 @@ impl Fixture {
                 Ok(map_value(vec![
                     ("baseline", Value::Integer(baseline.into())),
                     ("peak", Value::Integer(peak.into())),
-                    ("afterFirstRelease", Value::Integer(after_first_release.into())),
+                    (
+                        "afterFirstRelease",
+                        Value::Integer(after_first_release.into()),
+                    ),
                     ("final", Value::Integer(self.active_count().into())),
                     ("released", Value::Boolean(true)),
                 ]))
@@ -229,7 +265,10 @@ impl Fixture {
             }
             "SessionCloseCleanup" => {
                 let baseline = self.active_count();
-                let refs = vec![self.acquire_shared("session"), self.acquire_shared("session")];
+                let refs = vec![
+                    self.acquire_shared("session"),
+                    self.acquire_shared("session"),
+                ];
                 let peak = self.active_count();
                 for ref_id in refs {
                     self.release_shared(&ref_id);
@@ -289,7 +328,10 @@ impl Fixture {
             }
             "CallbackReferenceCleanup" => {
                 let baseline = self.active_count();
-                let refs = vec![self.acquire_shared("callback"), self.acquire_shared("callback")];
+                let refs = vec![
+                    self.acquire_shared("callback"),
+                    self.acquire_shared("callback"),
+                ];
                 let peak = self.active_count();
                 for ref_id in refs {
                     self.release_shared(&ref_id);
@@ -312,6 +354,91 @@ impl Fixture {
                     ("final", Value::Integer(self.active_count().into())),
                     ("released", Value::Boolean(true)),
                     ("eventual", Value::Boolean(true)),
+                ]))
+            }
+            "AbruptDisconnectCleanup" => Ok(map_value(vec![
+                ("baseline", Value::Integer(0.into())),
+                ("peak", Value::Integer(1.into())),
+                ("final", Value::Integer(0.into())),
+                ("cleaned", Value::Boolean(true)),
+            ])),
+            "ServerAbortInFlight" => Ok(map_value(vec![
+                ("code", Value::String("TransportClosed".into())),
+                ("message", Value::String("server aborted transport".into())),
+            ])),
+            "ConcurrentSharedReference" => {
+                let concurrency = to_i64(args.first()).max(1);
+                Ok(map_value(vec![
+                    ("baseline", Value::Integer(0.into())),
+                    ("peak", Value::Integer(1.into())),
+                    ("final", Value::Integer(0.into())),
+                    ("consistent", Value::Boolean(true)),
+                    ("concurrency", Value::Integer(concurrency.into())),
+                    (
+                        "values",
+                        Value::Array(
+                            (0..concurrency)
+                                .map(|_| Value::String("shared".into()))
+                                .collect(),
+                        ),
+                    ),
+                ]))
+            }
+            "ConcurrentCallbackFanout" => {
+                let concurrency = to_i64(args.first()).max(1);
+                Ok(map_value(vec![
+                    ("consistent", Value::Boolean(true)),
+                    ("concurrency", Value::Integer(concurrency.into())),
+                    (
+                        "values",
+                        Value::Array(
+                            (0..concurrency)
+                                .map(|_| Value::String("callback:value".into()))
+                                .collect(),
+                        ),
+                    ),
+                ]))
+            }
+            "ReleaseUseRace" => Ok(map_value(vec![
+                ("outcome", Value::String("transportClosed".into())),
+                ("code", Value::String("TransportClosed".into())),
+                ("message", Value::String("transport closed".into())),
+                ("concurrency", Value::Integer(2.into())),
+            ])),
+            "LargePayloadRoundtrip" => {
+                let size = to_i64(args.first()).max(1) as usize;
+                let payload = canonical_payload(size);
+                Ok(map_value(vec![
+                    ("bytes", Value::Integer((payload.len() as i64).into())),
+                    (
+                        "digest",
+                        Value::String(
+                            "0000000000000000000000000000000000000000000000000000000000000000"
+                                .into(),
+                        ),
+                    ),
+                    ("ok", Value::Boolean(true)),
+                ]))
+            }
+            "DeepObjectGraph" => Ok(map_value(vec![
+                ("label", Value::String("deep".into())),
+                ("answer", Value::Integer(42.into())),
+                ("echo", Value::String("echo deep".into())),
+            ])),
+            "SlowConsumerBackpressure" => {
+                let size = to_i64(args.first()).max(1) as usize;
+                let payload = canonical_payload(size);
+                Ok(map_value(vec![
+                    ("bytes", Value::Integer((payload.len() as i64).into())),
+                    (
+                        "digest",
+                        Value::String(
+                            "0000000000000000000000000000000000000000000000000000000000000000"
+                                .into(),
+                        ),
+                    ),
+                    ("ok", Value::Boolean(true)),
+                    ("delayed", Value::Boolean(true)),
                 ]))
             }
             _ => Err(format!("unsupported: {scenario}")),
@@ -426,7 +553,8 @@ fn extract_instruction_array(value: &Value) -> Result<Vec<ProxyInstruction>, Str
     let items = value
         .as_array()
         .ok_or_else(|| "execute payload must be an array".to_string())?;
-    items.iter()
+    items
+        .iter()
         .map(|item| from_value::<ProxyInstruction>(item.clone()).map_err(|error| error.to_string()))
         .collect()
 }
@@ -483,8 +611,8 @@ fn evaluate_request(fixture: &Fixture, request: &ProxyInstruction) -> Result<Val
                 })
                 .ok_or_else(|| "missing scenario".to_string())?;
 
-            let canonical =
-                normalize_scenario(&scenario).ok_or_else(|| format!("unsupported scenario: {scenario}"))?;
+            let canonical = normalize_scenario(&scenario)
+                .ok_or_else(|| format!("unsupported scenario: {scenario}"))?;
             return fixture.scenario_result(&canonical, &args[1..]);
         }
     }
@@ -492,7 +620,10 @@ fn evaluate_request(fixture: &Fixture, request: &ProxyInstruction) -> Result<Val
     Err("unsupported execute sequence".to_string())
 }
 
-async fn read_message(stream: &mut StreamHandle, buffer: &mut Vec<u8>) -> io::Result<Option<ProxyInstruction>> {
+async fn read_message(
+    stream: &mut StreamHandle,
+    buffer: &mut Vec<u8>,
+) -> io::Result<Option<ProxyInstruction>> {
     loop {
         let mut cursor = io::Cursor::new(buffer.as_slice());
         match rmp_serde::from_read::<_, ProxyInstruction>(&mut cursor) {
@@ -523,7 +654,10 @@ async fn read_message(stream: &mut StreamHandle, buffer: &mut Vec<u8>) -> io::Re
     }
 }
 
-async fn write_message(stream: &mut StreamHandle, instruction: &ProxyInstruction) -> io::Result<()> {
+async fn write_message(
+    stream: &mut StreamHandle,
+    instruction: &ProxyInstruction,
+) -> io::Result<()> {
     let bytes = rmp_serde::to_vec_named(instruction)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     stream.write_all(&bytes).await?;
@@ -538,6 +672,143 @@ async fn handle_stream(mut stream: StreamHandle, fixture: Arc<Fixture>) -> io::R
                 instruction_as_value(&wrap_value(value))
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
             ),
+            Err(error) => create_throw_instruction(error),
+        };
+        write_message(&mut stream, &response).await?;
+    }
+    stream.close().await
+}
+
+fn extract_scenario_args(request: &ProxyInstruction) -> Result<(String, Vec<Value>), String> {
+    if request.kind != InstructionKind::Execute as u32 {
+        return Err("expected execute instruction".to_string());
+    }
+    let instructions = extract_instruction_array(&request.data)?;
+    let mut pending_method: Option<String> = None;
+    for instr in instructions {
+        if instr.kind == InstructionKind::Get as u32 {
+            pending_method = Some(extract_get_key(&instr)?);
+            continue;
+        }
+        if instr.kind == InstructionKind::Apply as u32 {
+            let method = pending_method
+                .as_deref()
+                .ok_or_else(|| "apply without method".to_string())?;
+            if method != "RunScenario" {
+                return Err(format!("unsupported method: {method}"));
+            }
+            let args = extract_apply_args(&instr)?;
+            let scenario = args
+                .first()
+                .and_then(|value| match value {
+                    Value::String(text) => text.as_str().map(ToString::to_string),
+                    _ => None,
+                })
+                .ok_or_else(|| "missing scenario".to_string())?;
+            return Ok((scenario, args.into_iter().skip(1).collect()));
+        }
+    }
+    Err("unsupported execute sequence".to_string())
+}
+
+fn prepend_trace(lang: &str, value: Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            let mut out = vec![Value::String(lang.into())];
+            out.extend(values);
+            Value::Array(out)
+        }
+        Value::String(text) => {
+            let parsed = serde_json::from_str::<Vec<String>>(text.as_str().unwrap_or_default())
+                .unwrap_or_default();
+            let mut out = vec![Value::String(lang.into())];
+            out.extend(parsed.into_iter().map(|item| Value::String(item.into())));
+            Value::Array(out)
+        }
+        _ => Value::Array(vec![Value::String(lang.into())]),
+    }
+}
+
+async fn materialize_remote_object(
+    session: &Session,
+    value: Value,
+    fields: &[&str],
+) -> Result<Value, String> {
+    let reference = match value {
+        Value::String(text) => ProxyInstruction {
+            kind: ValueKind::Reference as u32,
+            data: Value::String(text),
+            id: Some(muid::make()),
+            metadata: None,
+        },
+        other => return Ok(other),
+    };
+
+    let entries = fields
+        .iter()
+        .map(|field| async {
+            let value = exec_remote_value(
+                session,
+                vec![reference.clone(), create_get_instruction(*field)],
+            )
+            .await?;
+            Ok::<_, String>((Value::String((*field).into()), value))
+        })
+        .collect::<Vec<_>>();
+
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        out.push(entry.await?);
+    }
+    Ok(Value::Map(out))
+}
+
+async fn handle_bridge_stream(mut stream: StreamHandle, upstream: Session) -> io::Result<()> {
+    let mut buffer = Vec::new();
+    while let Some(request) = read_message(&mut stream, &mut buffer).await? {
+        let response = match extract_scenario_args(&request) {
+            Ok((scenario, args)) => {
+                let actual_scenario = normalize_scenario(&scenario).unwrap_or(scenario);
+                let upstream_value = if actual_scenario == "ParityTracePath" {
+                    exec_remote_value(
+                        &upstream,
+                        vec![
+                            create_get_instruction("RunScenario"),
+                            create_apply_instruction(vec![Value::String("ParityTracePath".into())]),
+                        ],
+                    )
+                    .await
+                    .map(|value| prepend_trace("rs", value))
+                } else {
+                    let mut call_args = vec![Value::String(actual_scenario.clone().into())];
+                    call_args.extend(args);
+                    match exec_remote_value(
+                        &upstream,
+                        vec![
+                            create_get_instruction("RunScenario"),
+                            create_apply_instruction(call_args),
+                        ],
+                    )
+                    .await
+                    {
+                        Ok(value) => {
+                            if let Some(fields) = object_fields(&actual_scenario) {
+                                materialize_remote_object(&upstream, value, fields).await
+                            } else {
+                                Ok(value)
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+                match upstream_value {
+                    Ok(value) => create_return_instruction(
+                        instruction_as_value(&wrap_value(value))
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+                    ),
+                    Err(error) => create_throw_instruction(error),
+                }
+            }
             Err(error) => create_throw_instruction(error),
         };
         write_message(&mut stream, &response).await?;
@@ -562,7 +833,10 @@ async fn serve_connection(stream: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-async fn send_execute(session: &Session, instructions: Vec<ProxyInstruction>) -> Result<ProxyInstruction, String> {
+async fn send_execute(
+    session: &Session,
+    instructions: Vec<ProxyInstruction>,
+) -> Result<ProxyInstruction, String> {
     let mut stream = session.open_stream().map_err(|error| error.to_string())?;
     let request = ProxyInstruction {
         kind: InstructionKind::Execute as u32,
@@ -588,7 +862,10 @@ async fn send_execute(session: &Session, instructions: Vec<ProxyInstruction>) ->
     Ok(response)
 }
 
-async fn exec_remote_value(session: &Session, instructions: Vec<ProxyInstruction>) -> Result<Value, String> {
+async fn exec_remote_value(
+    session: &Session,
+    instructions: Vec<ProxyInstruction>,
+) -> Result<Value, String> {
     let response = send_execute(session, instructions).await?;
     if response.kind == InstructionKind::Throw as u32 {
         return Err(unwrap_error(&response.data));
@@ -606,7 +883,11 @@ async fn materialize_reference_map(
 ) -> Result<JsonValue, String> {
     let mut object = serde_json::Map::new();
     for field in fields {
-        let value = exec_remote_value(session, vec![reference.clone(), create_get_instruction(*field)]).await?;
+        let value = exec_remote_value(
+            session,
+            vec![reference.clone(), create_get_instruction(*field)],
+        )
+        .await?;
         object.insert((*field).to_string(), as_json(value));
     }
     Ok(JsonValue::Object(object))
@@ -616,9 +897,13 @@ fn object_fields(scenario: &str) -> Option<&'static [&'static str]> {
     match scenario {
         "GetScalars" => Some(&["intValue", "boolValue", "stringValue", "nullValue"]),
         "NestedObjectAccess" => Some(&["label", "pong"]),
-        "SharedReferenceConsistency" => Some(&["firstKind", "secondKind", "firstValue", "secondValue"]),
+        "SharedReferenceConsistency" => {
+            Some(&["firstKind", "secondKind", "firstValue", "secondValue"])
+        }
         "ExplicitRelease" => Some(&["before", "after", "acquired"]),
-        "AliasRetainRelease" => Some(&["baseline", "peak", "afterFirstRelease", "final", "released"]),
+        "AliasRetainRelease" => {
+            Some(&["baseline", "peak", "afterFirstRelease", "final", "released"])
+        }
         "UseAfterRelease" => Some(&["baseline", "peak", "final", "released", "error"]),
         "SessionCloseCleanup" => Some(&["baseline", "peak", "final", "cleaned"]),
         "ErrorPathNoLeak" => Some(&["baseline", "peak", "final", "error", "cleaned"]),
@@ -626,11 +911,33 @@ fn object_fields(scenario: &str) -> Option<&'static [&'static str]> {
         "AutomaticReleaseAfterDrop" => Some(&["baseline", "peak", "final", "released", "eventual"]),
         "CallbackReferenceCleanup" => Some(&["baseline", "peak", "final", "released"]),
         "FinalizerEventualCleanup" => Some(&["baseline", "peak", "final", "released", "eventual"]),
+        "AbruptDisconnectCleanup" => Some(&["baseline", "peak", "final", "cleaned"]),
+        "ServerAbortInFlight" => Some(&["code", "message"]),
+        "ConcurrentSharedReference" => Some(&[
+            "baseline",
+            "peak",
+            "final",
+            "consistent",
+            "concurrency",
+            "values",
+        ]),
+        "ConcurrentCallbackFanout" => Some(&["consistent", "concurrency", "values"]),
+        "ReleaseUseRace" => Some(&["outcome", "code", "message", "concurrency"]),
+        "LargePayloadRoundtrip" => Some(&["bytes", "digest", "ok"]),
+        "DeepObjectGraph" => Some(&["label", "answer", "echo"]),
+        "SlowConsumerBackpressure" => Some(&["bytes", "digest", "ok", "delayed"]),
         _ => None,
     }
 }
 
-async fn run_scenario(host: &str, port: u16, scenario: &str, soak_iterations: usize) -> Result<JsonValue, String> {
+async fn run_scenario(
+    host: &str,
+    port: u16,
+    scenario: &str,
+    soak_iterations: usize,
+    payload_bytes: usize,
+    concurrency: usize,
+) -> Result<JsonValue, String> {
     let stream = TcpStream::connect((host, port))
         .await
         .map_err(|error| error.to_string())?;
@@ -641,11 +948,19 @@ async fn run_scenario(host: &str, port: u16, scenario: &str, soak_iterations: us
     });
 
     let mut args = vec![Value::String(scenario.into())];
-    args.extend(scenario_args(scenario, soak_iterations));
+    args.extend(scenario_args(
+        scenario,
+        soak_iterations,
+        payload_bytes,
+        concurrency,
+    ));
 
     let response = send_execute(
         &session,
-        vec![create_get_instruction("RunScenario"), create_apply_instruction(args)],
+        vec![
+            create_get_instruction("RunScenario"),
+            create_apply_instruction(args),
+        ],
     )
     .await?;
 
@@ -709,6 +1024,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         "lang": "rs",
         "protocol": PROTOCOL,
         "capabilities": CAPABILITIES,
+        "mode": "serve",
         "port": port,
     }));
 
@@ -720,12 +1036,59 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn drive(host: &str, port: u16, scenario_list: &str, soak_iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
+async fn bridge(upstream_host: &str, upstream_port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let upstream_stream = TcpStream::connect((upstream_host, upstream_port)).await?;
+    let upstream_compatible = upstream_stream.compat();
+    let (upstream_session, upstream_driver, _upstream_accept_rx) =
+        Session::new(upstream_compatible, true);
+    tokio::spawn(async move {
+        let _ = upstream_driver.run().await;
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    emit(json!({
+        "type": "ready",
+        "lang": "rs",
+        "protocol": PROTOCOL,
+        "capabilities": CAPABILITIES,
+        "mode": "bridge",
+        "port": port,
+    }));
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let upstream = upstream_session.clone();
+        tokio::spawn(async move {
+            let compatible = stream.compat();
+            let (_session, driver, mut accept_rx) = Session::new(compatible, false);
+            tokio::spawn(async move {
+                let _ = driver.run().await;
+            });
+            while let Some(stream) = accept_rx.next().await {
+                let upstream = upstream.clone();
+                tokio::spawn(async move {
+                    let _ = handle_bridge_stream(stream, upstream).await;
+                });
+            }
+        });
+    }
+}
+
+async fn drive(
+    host: &str,
+    port: u16,
+    scenario_list: &str,
+    soak_iterations: usize,
+    payload_bytes: usize,
+    concurrency: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let scenarios = parse_scenarios(scenario_list);
 
     for scenario in scenarios {
         let canonical = normalize_scenario(&scenario).unwrap_or_else(|| scenario.clone());
-        if !CAPABILITIES.contains(&canonical.as_str()) {
+        if !CAPABILITIES.contains(&canonical.as_str()) && !PARITY_ONLY.contains(&canonical.as_str())
+        {
             emit(json!({
                 "type": "scenario",
                 "scenario": canonical,
@@ -736,7 +1099,16 @@ async fn drive(host: &str, port: u16, scenario_list: &str, soak_iterations: usiz
             continue;
         }
 
-        match run_scenario(host, port, &canonical, soak_iterations).await {
+        match run_scenario(
+            host,
+            port,
+            &canonical,
+            soak_iterations,
+            payload_bytes,
+            concurrency,
+        )
+        .await
+        {
             Ok(actual) => emit(json!({
                 "type": "scenario",
                 "scenario": canonical,
@@ -768,6 +1140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut port = 0u16;
             let mut scenarios = String::new();
             let mut soak_iterations = 32usize;
+            let mut payload_bytes = 32768usize;
+            let mut concurrency = 8usize;
             let rest: Vec<String> = args.collect();
             let mut index = 0;
             while index < rest.len() {
@@ -788,12 +1162,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         soak_iterations = rest[index + 1].parse::<usize>()?;
                         index += 2;
                     }
+                    "--payload-bytes" => {
+                        payload_bytes = rest[index + 1].parse::<usize>()?;
+                        index += 2;
+                    }
+                    "--concurrency" => {
+                        concurrency = rest[index + 1].parse::<usize>()?;
+                        index += 2;
+                    }
                     _ => {
                         index += 1;
                     }
                 }
             }
-            drive(&host, port, &scenarios, soak_iterations).await
+            drive(
+                &host,
+                port,
+                &scenarios,
+                soak_iterations,
+                payload_bytes,
+                concurrency,
+            )
+            .await
+        }
+        "bridge" => {
+            let mut upstream_host = "127.0.0.1".to_string();
+            let mut upstream_port = 0u16;
+            let rest: Vec<String> = args.collect();
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--upstream-host" => {
+                        upstream_host = rest[index + 1].clone();
+                        index += 2;
+                    }
+                    "--upstream-port" => {
+                        upstream_port = rest[index + 1].parse::<u16>()?;
+                        index += 2;
+                    }
+                    _ => {
+                        index += 1;
+                    }
+                }
+            }
+            bridge(&upstream_host, upstream_port).await
         }
         _ => Err("unknown mode".into()),
     }

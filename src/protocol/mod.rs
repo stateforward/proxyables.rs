@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,7 +34,7 @@ pub enum InstructionKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyInstruction {
-    pub kind: u32, // Serialized as generic primitive mostly, but we use u32
+    pub kind: u32,         // Serialized as generic primitive mostly, but we use u32
     pub data: rmpv::Value, // Use RMPV Value for dynamic typing, or serde_json::Value
     pub id: Option<String>,
     pub metadata: Option<rmpv::Value>,
@@ -74,7 +73,9 @@ pub fn create_execute_instruction(instructions: Vec<ProxyInstruction>) -> ProxyI
         rmpv::Value::Array(
             instructions
                 .into_iter()
-                .map(|instruction| rmpv::ext::to_value(instruction).expect("instruction should serialize"))
+                .map(|instruction| {
+                    rmpv::ext::to_value(instruction).expect("instruction should serialize")
+                })
                 .collect(),
         ),
     )
@@ -85,7 +86,10 @@ pub fn create_return_instruction(value: rmpv::Value) -> ProxyInstruction {
 }
 
 pub fn create_throw_instruction(message: impl Into<String>) -> ProxyInstruction {
-    create_instruction(InstructionKind::Throw, rmpv::Value::String(message.into().into()))
+    create_instruction(
+        InstructionKind::Throw,
+        rmpv::Value::String(message.into().into()),
+    )
 }
 
 pub fn create_release_instruction(id: impl Into<String>) -> ProxyInstruction {

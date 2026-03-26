@@ -1,8 +1,7 @@
-
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::Mutex;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // EPOCH = 1700000000000
 const EPOCH: u64 = 1700000000000;
@@ -27,7 +26,7 @@ impl GeneratorState {
         let mut hasher = DefaultHasher::new();
         hostname.hash(&mut hasher);
         let machine_id = hasher.finish() & MAX_MACHINE_ID;
-        
+
         Self {
             last_timestamp: 0,
             counter: 0,
@@ -38,37 +37,47 @@ impl GeneratorState {
 
 pub fn make() -> String {
     let mut state = STATE.lock().unwrap();
-    let mut current_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 - EPOCH;
-    
+    let mut current_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - EPOCH;
+
     if current_timestamp < state.last_timestamp {
         current_timestamp = state.last_timestamp;
     }
-    
+
     if current_timestamp == state.last_timestamp {
         state.counter = (state.counter + 1) & MAX_COUNTER;
         if state.counter == 0 {
             // Overflow, wait
             while current_timestamp == state.last_timestamp {
-                 current_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 - EPOCH;
+                current_timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    - EPOCH;
             }
         }
     } else {
         state.counter = 0;
     }
-    
+
     state.last_timestamp = current_timestamp;
-    
+
     let id_int = (current_timestamp << (MACHINE_ID_BITS + COUNTER_BITS))
         | (state.machine_id << COUNTER_BITS)
         | state.counter;
-        
+
     to_base32(id_int)
 }
 
 fn to_base32(mut num: u64) -> String {
     let alphabet = b"0123456789abcdefghijklmnopqrstuv";
     let mut res = Vec::new();
-    if num == 0 { return "0".to_string(); }
+    if num == 0 {
+        return "0".to_string();
+    }
     while num > 0 {
         res.push(alphabet[(num % 32) as usize] as char);
         num /= 32;
