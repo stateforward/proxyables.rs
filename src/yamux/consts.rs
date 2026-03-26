@@ -12,6 +12,7 @@ pub const FLAG_FIN: u16 = 4;
 pub const FLAG_RST: u16 = 8;
 
 pub const HEADER_LENGTH: usize = 12;
+pub const WINDOW_SIZE: u32 = 256 * 1024;
 
 pub const ERR_NORMAL: u32 = 0;
 pub const ERR_PROTOCOL: u32 = 1;

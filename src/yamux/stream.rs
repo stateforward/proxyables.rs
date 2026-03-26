@@ -87,7 +87,7 @@ impl AsyncWrite for StreamHandle {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let state = self.state.lock().unwrap();
-        if state.closed {
+        if state.closed || state.remote_closed {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "Stream closed")));
         }
         
@@ -108,7 +108,7 @@ impl AsyncWrite for StreamHandle {
         if state.closed { return Poll::Ready(Ok(())); }
         state.closed = true;
         
-        let frame = Frame::new(TYPE_DATA, FLAG_FIN, state.id, vec![]);
+        let frame = Frame::control(TYPE_WINDOW_UPDATE, FLAG_FIN, state.id, 0);
         let _ = state.write_sender.unbounded_send(frame);
         Poll::Ready(Ok(()))
     }

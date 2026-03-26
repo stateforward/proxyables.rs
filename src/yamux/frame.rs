@@ -40,6 +40,19 @@ impl Frame {
         }
     }
 
+    pub fn control(typ: u8, flags: u16, stream_id: u32, length: u32) -> Self {
+        Self {
+            header: FrameHeader {
+                version: PROTOCOL_VERSION,
+                typ,
+                flags,
+                stream_id,
+                length,
+            },
+            payload: Vec::new(),
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(HEADER_LENGTH + self.payload.len());
         buf.push(self.header.version);

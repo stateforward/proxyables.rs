@@ -64,8 +64,7 @@ impl Session {
         let stream = StreamHandle::new(id, self.write_sender.clone());
         state.streams.insert(id, stream.clone());
         
-        // Send SYN
-        let frame = Frame::new(TYPE_DATA, FLAG_SYN, id, vec![]);
+        let frame = Frame::control(TYPE_WINDOW_UPDATE, FLAG_SYN, id, WINDOW_SIZE);
         self.write_sender.unbounded_send(frame).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Failed to send SYN"))?;
         
         Ok(stream)
@@ -86,6 +85,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SessionDriver<T> {
              let flags = frame.header.flags;
              let typ = frame.header.typ;
 
+             if typ == TYPE_PING {
+                 if flags & FLAG_SYN != 0 {
+                     let _ = write_sender.unbounded_send(Frame::control(TYPE_PING, FLAG_ACK, 0, frame.header.length));
+                 }
+                 return Ok(());
+             }
+
+             if typ == TYPE_GO_AWAY {
+                 return Ok(());
+             }
+
              let stream_opt = {
                  let mut s = state.lock().unwrap();
                  if flags & FLAG_SYN != 0 {
@@ -93,6 +103,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SessionDriver<T> {
                           let stream = StreamHandle::new(stream_id, write_sender.clone());
                           s.streams.insert(stream_id, stream.clone());
                           let _ = accept_sender.unbounded_send(stream);
+                          let _ = write_sender.unbounded_send(Frame::control(TYPE_WINDOW_UPDATE, FLAG_ACK, stream_id, WINDOW_SIZE));
                      }
                  }
                  s.streams.get(&stream_id).cloned()
@@ -103,9 +114,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SessionDriver<T> {
                       if !frame.payload.is_empty() {
                           stream.feed_data(frame.payload);
                       }
-                      if flags & FLAG_FIN != 0 {
-                          stream.on_fin();
-                      }
+                  }
+                  if flags & FLAG_FIN != 0 {
+                      stream.on_fin();
                   }
                   if flags & FLAG_RST != 0 {
                       stream.on_fin();
@@ -134,7 +145,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SessionDriver<T> {
                                 match super::frame::Frame::decode_header(&header_buf) {
                                     Ok(header) => {
                                         current_header = Some(header.clone());
-                                        if header.length > 0 {
+                                        if header.typ == TYPE_DATA && header.length > 0 {
                                             reading_body = true;
                                             body_buf = vec![0u8; header.length as usize];
                                             read_future = reader.read_exact(&mut body_buf).fuse();
