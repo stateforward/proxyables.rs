@@ -1,7 +1,6 @@
 
 use super::consts::*;
 use byteorder::{BigEndian, ByteOrder};
-use std::io::{self, Cursor, Write};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]

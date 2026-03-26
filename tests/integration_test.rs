@@ -43,6 +43,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use proxyables::proxy;
 
 #[proxy]
+#[allow(dead_code)]
 trait MyApi {
    async fn add(&self, a: i64, b: i64) -> i64;
 }

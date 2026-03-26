@@ -1,15 +1,9 @@
 
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use futures::channel::mpsc;
-use futures::{StreamExt, FutureExt};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use std::io;
 use rmpv::Value;
-use crate::yamux::session::{Session, SessionDriver};
-use crate::yamux::stream::StreamHandle;
-use crate::registry::Registry;
-use crate::protocol::{ProxyInstruction, InstructionKind, ValueKind, ProxyInstruction as PInstr};
+use crate::yamux::session::Session;
+use crate::protocol::{ProxyInstruction, InstructionKind};
 
 // A handle to the remote proxy
 #[derive(Clone)]
@@ -25,41 +19,11 @@ impl ImportedProxyable {
     }
 
     /// Execute a remote method call
-    pub async fn call(&self, target_id: Option<String>, method: String, args: Vec<Value>) -> Result<Value, String> {
-        let instr = ProxyInstruction {
-            kind: InstructionKind::Apply as u32, // Or Execute? Apply usually for methods.
-            // If target_id is None, it might be root? TS uses explicit IDs.
-            // We assume root if None? Protocol defines this.
-            id: target_id, 
-            data: Value::Array(args), // Args as data
-            metadata: None, // Method name in metadata? Or we use `get`+`apply`?
-            // In the simplified Python port, we might have skipped the "Get Function Then Apply" step for brevity in testing?
-            // TS does `createApplyInstruction(target, args)`. 
-            // If we want to call "method" on "object", we usually:
-            // 1. GET object.method -> FunctionID
-            // 2. APPLY FunctionID (args)
-            // But efficient implementations often support "Call Method on Object" in one go or "Apply" is only for Functions.
-            // Let's assume we invoke `Execute` or `Apply` on the target object.
-            
-            // To match TS exact behavior:
-            // `remote.foo(10)` -> 
-            // 1. GET 'foo' -> Reference(Function)
-            // 2. APPLY Reference(10)
-            
-            // For this Rust port, to enable E2E testing similar to Python:
-            // Python `proxy.add(10, 20)` -> 
-            // 1. GET 'add' -> Ref
-            // 2. APPLY Ref
-            
-            // We'll implement `get` and `apply`.
-        };
-        
+    pub async fn call(&self, target_id: Option<String>, _method: String, args: Vec<Value>) -> Result<Value, String> {
         // This helper specifically for "call" needs to mirror that flow if we want high fidelity.
         // But for "Direct" dispatch (if supported):
         // We'll stick to: Open Stream -> Send EXECUTE/APPLY -> Read Request.
-        
-        // We need `apply` method.
-        todo!("Split into get/apply components");
+        self.apply(target_id, args).await
     }
 
     pub async fn apply(&self, target_id: Option<String>, args: Vec<Value>) -> Result<Value, String> {

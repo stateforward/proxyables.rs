@@ -83,24 +83,13 @@ pub fn proxy(_attr: TokenStream, item: TokenStream) -> TokenStream {
         if let TraitItem::Fn(method) = item {
             let sig = &method.sig;
             let ident = &sig.ident;
-            let ident_str = ident.to_string();
             let inputs = &sig.inputs;
-            let output = &sig.output;
             
             // Filter inputs to exclude &self for the method signature
             let args_sig: Vec<_> = inputs.iter().filter(|arg| {
                 if let FnArg::Receiver(_) = arg { false } else { true }
             }).collect();
 
-            // Extract arg names for forwarding
-            let arg_names = args_sig.iter().map(|arg| {
-                 if let FnArg::Typed(pat_type) = arg {
-                     &pat_type.pat
-                 } else {
-                     panic!("Self not allowed here")
-                 }
-            });
-            
             // For now, assume Args convert to Value via Into/From or rmpv::Value::from
             // We construct vec![arg1.into(), arg2.into()]
              let arg_conversions = args_sig.iter().map(|arg| {

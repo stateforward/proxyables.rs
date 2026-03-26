@@ -1,16 +1,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-static LAST_TIMESTAMP: AtomicU32 = AtomicU32::new(0); // Only stores low bits or full? Need Mutex for safe timestamp tracking across threads usually.
-
 // EPOCH = 1700000000000
 const EPOCH: u64 = 1700000000000;
-const TIMESTAMP_BITS: u64 = 41;
 const MACHINE_ID_BITS: u64 = 14;
 const COUNTER_BITS: u64 = 9;
 const MAX_MACHINE_ID: u64 = (1 << MACHINE_ID_BITS) - 1;

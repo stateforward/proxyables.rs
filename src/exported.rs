@@ -1,15 +1,13 @@
 
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use futures::channel::mpsc;
-use futures::{StreamExt, FutureExt};
-use std::sync::Arc;
+use futures::StreamExt;
 use rmpv::Value;
 use std::io;
-use std::marker::Unpin;
 
 use crate::yamux::stream::StreamHandle;
 use crate::registry::Registry;
-use crate::protocol::{ProxyInstruction, InstructionKind, ValueKind, ProxyInstruction as PInstr};
+use crate::protocol::{InstructionKind, ProxyInstruction as PInstr};
 
 pub struct ExportedProxyable {
     registry: Registry,
