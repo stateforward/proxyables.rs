@@ -57,10 +57,10 @@ async fn test_e2e_rust_port() {
 
     let root = Arc::new(MyTarget);
     tokio::spawn(async move {
-        Proxyable::export(server_stream, root).await.unwrap();
+        Proxyable::Export(server_stream, root).await.unwrap();
     });
 
-    let (imported, driver) = Proxyable::import_from(client_stream);
+    let (imported, driver) = Proxyable::ImportFrom(client_stream);
     tokio::spawn(async move {
         driver.await.unwrap();
     });

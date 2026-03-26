@@ -14,17 +14,7 @@ use crate::registry::{Registry, ProxyTarget};
 pub struct Proxyable;
 
 impl Proxyable {
-    pub fn import_from<S>(stream: S) -> (ImportedProxyable, impl Future<Output = std::io::Result<()>> + Send + 'static)
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let (session, driver, _) = Session::new(stream, true);
-        let proxy = ImportedProxyable::new(session);
-        
-        (proxy, driver.run())
-    }
-
-    pub fn export<S>(stream: S, target: Arc<dyn ProxyTarget>) -> impl Future<Output = std::io::Result<()>> + Send + 'static
+    pub fn Export<S>(stream: S, target: Arc<dyn ProxyTarget>) -> impl Future<Output = std::io::Result<()>> + Send + 'static
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -70,5 +60,15 @@ impl Proxyable {
             }
             Ok(())
         }
+    }
+
+    pub fn ImportFrom<S>(stream: S) -> (ImportedProxyable, impl Future<Output = std::io::Result<()>> + Send + 'static)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (session, driver, _) = Session::new(stream, true);
+        let proxy = ImportedProxyable::new(session);
+        
+        (proxy, driver.run())
     }
 }

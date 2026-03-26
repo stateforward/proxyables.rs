@@ -41,7 +41,7 @@ impl API {
 }
 
 // stream is any AsyncRead + AsyncWrite
-Proxyable::export(stream, Arc::new(API)).await;
+Proxyable::Export(stream, Arc::new(API)).await;
 ```
 
 **Client (Importing the object):**
@@ -54,7 +54,7 @@ trait Api {
     async fn compute(&self, a: i64, b: i64) -> i64;
 }
 
-let (imported, driver) = Proxyable::import_from(stream);
+let (imported, driver) = Proxyable::ImportFrom(stream);
 tokio::spawn(driver);
 
 let proxy = ApiProxy::new(imported);
