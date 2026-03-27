@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
 use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -938,6 +939,18 @@ async fn run_scenario(
     payload_bytes: usize,
     concurrency: usize,
 ) -> Result<JsonValue, String> {
+    let session = open_session(host, port).await?;
+    execute_scenario(
+        &session,
+        scenario,
+        soak_iterations,
+        payload_bytes,
+        concurrency,
+    )
+    .await
+}
+
+async fn open_session(host: &str, port: u16) -> Result<Session, String> {
     let stream = TcpStream::connect((host, port))
         .await
         .map_err(|error| error.to_string())?;
@@ -946,7 +959,16 @@ async fn run_scenario(
     tokio::spawn(async move {
         let _ = driver.run().await;
     });
+    Ok(session)
+}
 
+async fn execute_scenario(
+    session: &Session,
+    scenario: &str,
+    soak_iterations: usize,
+    payload_bytes: usize,
+    concurrency: usize,
+) -> Result<JsonValue, String> {
     let mut args = vec![Value::String(scenario.into())];
     args.extend(scenario_args(
         scenario,
@@ -1013,6 +1035,37 @@ fn as_json(value: Value) -> JsonValue {
         }
         _ => JsonValue::String(format!("{value:?}")),
     }
+}
+
+fn build_benchmark_metrics(samples: &[f64]) -> JsonValue {
+    if samples.is_empty() {
+        return json!({
+            "totalMs": 0.0,
+            "avgMs": 0.0,
+            "ops": 0.0,
+            "p50Ms": 0.0,
+            "p95Ms": 0.0,
+            "minMs": 0.0,
+            "maxMs": 0.0,
+        });
+    }
+
+    let mut ordered = samples.to_vec();
+    ordered.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let total: f64 = ordered.iter().sum();
+    let average = total / ordered.len() as f64;
+    let p50_index = (((ordered.len() - 1) as f64) * 0.50).round() as usize;
+    let p95_index = (((ordered.len() - 1) as f64) * 0.95).round() as usize;
+
+    json!({
+        "totalMs": total,
+        "avgMs": average,
+        "ops": if total > 0.0 { (ordered.len() as f64) * 1000.0 / total } else { 0.0 },
+        "p50Ms": ordered[p50_index],
+        "p95Ms": ordered[p95_index],
+        "minMs": ordered[0],
+        "maxMs": ordered[ordered.len() - 1],
+    })
 }
 
 async fn serve() -> Result<(), Box<dyn std::error::Error>> {
@@ -1129,6 +1182,92 @@ async fn drive(
     Ok(())
 }
 
+async fn bench(
+    host: &str,
+    port: u16,
+    scenario_list: &str,
+    iterations: usize,
+    warmup: usize,
+    payload_bytes: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scenarios = parse_scenarios(scenario_list);
+
+    for scenario in scenarios {
+        let canonical = normalize_scenario(&scenario).unwrap_or_else(|| scenario.clone());
+        if !CAPABILITIES.contains(&canonical.as_str()) && !PARITY_ONLY.contains(&canonical.as_str())
+        {
+            emit(json!({
+                "type": "benchmark",
+                "scenario": canonical,
+                "status": "unsupported",
+                "protocol": PROTOCOL,
+                "message": "unsupported",
+            }));
+            continue;
+        }
+
+        let session = match open_session(host, port).await {
+            Ok(session) => session,
+            Err(error) => {
+                emit(json!({
+                    "type": "benchmark",
+                    "scenario": canonical,
+                    "status": "failed",
+                    "protocol": PROTOCOL,
+                    "message": error,
+                }));
+                continue;
+            }
+        };
+
+        let mut failed: Option<String> = None;
+        for _ in 0..warmup {
+            if let Err(error) = execute_scenario(&session, &canonical, 32, payload_bytes, 8).await {
+                failed = Some(error);
+                break;
+            }
+        }
+
+        let mut samples = Vec::with_capacity(iterations);
+        if failed.is_none() {
+            for _ in 0..iterations {
+                let start = Instant::now();
+                match execute_scenario(&session, &canonical, 32, payload_bytes, 8).await {
+                    Ok(_) => samples.push(start.elapsed().as_secs_f64() * 1000.0),
+                    Err(error) => {
+                        failed = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = failed {
+            emit(json!({
+                "type": "benchmark",
+                "scenario": canonical,
+                "status": "failed",
+                "protocol": PROTOCOL,
+                "message": error,
+            }));
+            continue;
+        }
+
+        emit(json!({
+            "type": "benchmark",
+            "scenario": canonical,
+            "status": "passed",
+            "protocol": PROTOCOL,
+            "iterations": iterations,
+            "warmup": warmup,
+            "metrics": build_benchmark_metrics(&samples),
+        }));
+    }
+
+    sleep(Duration::from_millis(1)).await;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -1184,6 +1323,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 concurrency,
             )
             .await
+        }
+        "bench" => {
+            let mut host = "127.0.0.1".to_string();
+            let mut port = 0u16;
+            let mut scenarios = String::new();
+            let mut iterations = 1000usize;
+            let mut warmup = 100usize;
+            let mut payload_bytes = 32768usize;
+            let rest: Vec<String> = args.collect();
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--host" => {
+                        host = rest[index + 1].clone();
+                        index += 2;
+                    }
+                    "--port" => {
+                        port = rest[index + 1].parse::<u16>()?;
+                        index += 2;
+                    }
+                    "--scenarios" => {
+                        scenarios = rest[index + 1].clone();
+                        index += 2;
+                    }
+                    "--iterations" => {
+                        iterations = rest[index + 1].parse::<usize>()?;
+                        index += 2;
+                    }
+                    "--warmup" => {
+                        warmup = rest[index + 1].parse::<usize>()?;
+                        index += 2;
+                    }
+                    "--payload-bytes" => {
+                        payload_bytes = rest[index + 1].parse::<usize>()?;
+                        index += 2;
+                    }
+                    _ => {
+                        index += 1;
+                    }
+                }
+            }
+            bench(&host, port, &scenarios, iterations, warmup, payload_bytes).await
         }
         "bridge" => {
             let mut upstream_host = "127.0.0.1".to_string();
